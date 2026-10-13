@@ -1,0 +1,206 @@
+name: Build NVIDIA macOS Driver
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_macos:
+        description: 'Target macOS version'
+        type: choice
+        options:
+          - '15'  # Sequoia
+          - '26'  # Tahoe
+        default: '26'
+      build_type:
+        description: 'Build type'
+        type: choice
+        options:
+          - 'release'
+          - 'debug'
+        default: 'release'
+
+jobs:
+  build:
+    name: Build on macOS-${{ github.event.inputs.target_macos }}
+    runs-on: macos-14  # Xcode 16 available
+    timeout-minutes: 120
+    env:
+      TARGET_MACOS: ${{ github.event.inputs.target_macos }}
+      BUILD_TYPE: ${{ github.event.inputs.build_type }}
+      OGKM_VERSION: 610.57.04
+      MESA_COMMIT: 17ca6174
+
+    steps:
+      - name: Checkout driver repo
+        uses: actions/checkout@v4
+        with:
+          path: nvidia-macos-driver
+
+      - name: Setup Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.app
+          xcodebuild -version
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          source "$HOME/.cargo/env"
+          rustup default stable
+
+      - name: Install Meson, Ninja, CMake
+        run: |
+          brew install meson ninja cmake pkg-config
+
+      - name: Install Vulkan Headers
+        run: |
+          brew install vulkan-headers
+
+      - name: Clone NVIDIA open-gpu-kernel-modules (OGKM)
+        run: |
+          git clone --branch ${{ env.OGKM_VERSION }} --depth 1 \
+            https://github.com/NVIDIA/open-gpu-kernel-modules.git ~/ogkm610
+
+      - name: Prepare Mesa source for NVK
+        run: |
+          git clone https://gitlab.freedesktop.org/mesa/mesa.git ~/mesa-nvk
+          cd ~/mesa-nvk
+          git checkout ${{ env.MESA_COMMIT }}
+          # Apply NVK macOS patch
+          git apply ~/nvidia-macos-driver/nvk/nvk-macos.patch
+
+      - name: Build Translator (libnvmtl_translate.dylib)
+        run: |
+          cd ~/nvidia-macos-driver
+          mkdir -p ~/nvmtl-build/bindless
+          rsync -a translator/ ~/nvmtl-build/bindless/
+          cd ~/nvmtl-build/bindless
+          export PATH="$HOME/.cargo/bin:$PATH"
+          export RUSTFLAGS="--remap-path-prefix=$(pwd)=/src --remap-path-prefix=$HOME=/build"
+          cargo build --release --manifest-path wrapper/Cargo.toml
+          strip -S target/release/libnvmtl_translate.dylib
+          install_name_tool -id @rpath/libnvmtl_translate.dylib target/release/libnvmtl_translate.dylib
+          codesign -f -s - target/release/libnvmtl_translate.dylib
+          mkdir -p artifacts/translator
+          cp target/release/libnvmtl_translate.dylib artifacts/translator/
+
+      - name: Build Metal Plugin (NVMTLDriver.bundle)
+        run: |
+          cd ~/nvidia-macos-driver/plugin
+          mkdir -p ~/nvmtl-build/LIVE/plugin
+          rsync -a . ~/nvmtl-build/LIVE/plugin/
+          cd ~/nvmtl-build/LIVE/plugin
+          if [ "${{ env.BUILD_TYPE }}" = "release" ]; then
+            RELEASE=1 NVMTL_RELEASE=1 xcrun clang -arch x86_64 -bundle -fobjc-arc -O1 -DNVMTL_RELEASE=1 \
+              -I"$HOME/Vulkan-Headers/include" -o NVMTLDriver NVMTLDevice.m \
+              -framework Foundation -framework Metal -framework IOSurface
+          else
+            xcrun clang -arch x86_64 -bundle -fobjc-arc -O0 \
+              -I"$HOME/Vulkan-Headers/include" -o NVMTLDriver NVMTLDevice.m \
+              -framework Foundation -framework Metal -framework IOSurface
+          fi
+          codesign -f -s - NVMTLDriver
+          mkdir -p ~/nvidia-macos-driver/artifacts/plugin
+          cp NVMTLDriver ~/nvidia-macos-driver/artifacts/plugin/
+
+      - name: Build NVK (libvulkan_nouveau.dylib)
+        run: |
+          cd ~/mesa-nvk
+          meson setup build263 \
+            -Dbuildtype=debugoptimized \
+            -Dvulkan-drivers=nouveau \
+            -Dgallium-drivers= \
+            -Dplatforms= \
+            -Degl=disabled -Dglx=disabled -Dglvnd=disabled -Dllvm=disabled \
+            -Dmesa-clc=system -Dshared-glapi=disabled -Dvulkan-layers= \
+            -Dtools= -Dbuild-tests=false -Dexpat=disabled -Dzstd=disabled \
+            -Dlibunwind=disabled -Dlmsensors=disabled -Dvalgrind=disabled \
+            -Dxlib-lease=disabled -Dgallium-rusticl=false -Dspirv-tools=disabled
+          meson configure build263 \
+            "-Dc_args=-ffile-prefix-map=$(pwd)=/src -ffile-prefix-map=$HOME=/build" \
+            "-Dcpp_args=-ffile-prefix-map=$(pwd)=/src -ffile-prefix-map=$HOME=/build" \
+            "-Drust_args=--remap-path-prefix=$(pwd)=/src --remap-path-prefix=$HOME=/build"
+          ninja -C build263 -k 0 src/nouveau/vulkan/libvulkan_nouveau.dylib
+          strip -S build263/src/nouveau/vulkan/libvulkan_nouveau.dylib
+          mkdir -p ~/nvidia-macos-driver/artifacts/nvk
+          cp build263/src/nouveau/vulkan/libvulkan_nouveau.dylib ~/nvidia-macos-driver/artifacts/nvk/
+
+      - name: Build Kernel Extensions (kexts)
+        run: |
+          cd ~/nvidia-macos-driver
+          mkdir -p artifacts/kexts
+          
+          # Build NVAccel for target macOS
+          if [ "${{ env.TARGET_MACOS }}" = "26" ]; then
+            NM_TAHOE=1 bash build/accel_build.sh kexts/NVRM/accel artifacts/kexts/26
+            cp -r artifacts/kexts/26/NVAccel.kext artifacts/kexts/NVAccel_Tahoe.kext
+          else
+            bash build/accel_build.sh kexts/NVRM/accel artifacts/kexts/15
+            cp -r artifacts/kexts/15/NVAccel.kext artifacts/kexts/NVAccel_Sequoia.kext
+          fi
+          
+          # Build other kexts (NVRM, NVRMFB, NVRMAGDC, NMDRM, NMHDA, NMIntelFB)
+          # These use the NVIDIA OGKM - simplified build for CI
+          for kext in NVRM NVRMFB NVRMAGDC NMDRM NMHDA NMIntelFB; do
+            if [ -f kexts/$kext/build.sh ]; then
+              cd kexts/$kext
+              bash build.sh
+              cp -r *.kext ~/nvidia-macos-driver/artifacts/kexts/ 2>/dev/null || true
+              cd ~/nvidia-macos-driver
+            fi
+          done
+
+      - name: Create Release Package
+        run: |
+          cd ~/nvidia-macos-driver
+          mkdir -p pkgroot/Library/GPUBundles pkgroot/Library/Extensions pkgroot/Users/Shared/nvfw/nvidia
+          
+          # Copy plugin
+          cp -r artifacts/plugin/NVMTLDriver pkgroot/Library/GPUBundles/NVMTLDriver.bundle
+          cp artifacts/translator/libnvmtl_translate.dylib pkgroot/Library/GPUBundles/NVMTLDriver.bundle/
+          
+          # Copy NVK
+          mkdir -p pkgroot/Library/GPUBundles/nvmtl
+          cp artifacts/nvk/libvulkan_nouveau.dylib pkgroot/Library/GPUBundles/nvmtl/
+          
+          # Copy kexts
+          cp -r artifacts/kexts/*.kext pkgroot/Library/Extensions/
+          
+          # Create install.sh
+          cat > pkgroot/install.sh << 'INSTALL_EOF'
+          #!/bin/bash
+          set -euo pipefail
+          echo "Installing NVIDIA driver..."
+          sudo cp -R Library/GPUBundles/* /Library/GPUBundles/
+          sudo cp -R Library/Extensions/* /Library/Extensions/
+          sudo kmutil install -u --volume-root /
+          echo "Rebuilding Auxiliary Kernel Collection..."
+          sudo kmutil trigger-panic-medic --volume-root /
+          echo "Done. Reboot required."
+          INSTALL_EOF
+          chmod +x pkgroot/install.sh
+          
+          # Create SHA256SUMS
+          cd pkgroot
+          find . -type f -name "*.kext" -o -name "*.bundle" -o -name "*.dylib" -o -name "install.sh" | \
+            xargs shasum -a 256 > SHA256SUMS
+          
+          # Package
+          cd ..
+          tar -czf nullmoth-nvidia-macos${TARGET_MACOS}-${{ github.run_number }}.tar.gz pkgroot
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nvidia-driver-macos${{ env.TARGET_MACOS }}-${{ env.BUILD_TYPE }}
+          path: |
+            nvidia-macos-driver/artifacts/**
+            nvidia-macos-driver/nullmoth-nvidia-macos${{ env.TARGET_MACOS }}-*.tar.gz
+          retention-days: 30
+
+      - name: Create GitHub Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            nvidia-macos-driver/nullmoth-nvidia-macos${{ env.TARGET_MACOS }}-*.tar.gz
+          generate_release_notes: true
