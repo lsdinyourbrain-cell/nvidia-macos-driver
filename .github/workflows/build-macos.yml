@@ -109,16 +109,26 @@ jobs:
 
       - name: Build Metal Plugin
         run: |
+          # Find Vulkan headers installed by Homebrew
+          VULKAN_INCLUDE=$(brew --prefix vulkan-headers 2>/dev/null)/include
+          if [ ! -f "$VULKAN_INCLUDE/vulkan/vulkan_core.h" ]; then
+            VULKAN_INCLUDE="/opt/homebrew/include"
+          fi
+          if [ ! -f "$VULKAN_INCLUDE/vulkan/vulkan_core.h" ]; then
+            VULKAN_INCLUDE="/usr/local/include"
+          fi
+          echo "Using Vulkan headers from: $VULKAN_INCLUDE"
+          
           mkdir -p ~/nvmtl-build/LIVE/plugin
           rsync -a ${{ github.workspace }}/plugin/ ~/nvmtl-build/LIVE/plugin/
           cd ~/nvmtl-build/LIVE/plugin
           if [ "${{ env.BUILD_TYPE }}" = "release" ]; then
             xcrun clang -arch x86_64 -bundle -fobjc-arc -O1 -DNVMTL_RELEASE=1 \
-              -I"$HOME/Vulkan-Headers/include" -o NVMTLDriver NVMTLDevice.m \
+              -I"$VULKAN_INCLUDE" -o NVMTLDriver NVMTLDevice.m \
               -framework Foundation -framework Metal -framework IOSurface
           else
             xcrun clang -arch x86_64 -bundle -fobjc-arc -O0 \
-              -I"$HOME/Vulkan-Headers/include" -o NVMTLDriver NVMTLDevice.m \
+              -I"$VULKAN_INCLUDE" -o NVMTLDriver NVMTLDevice.m \
               -framework Foundation -framework Metal -framework IOSurface
           fi
           codesign -f -s - NVMTLDriver
