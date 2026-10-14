@@ -107,11 +107,6 @@ jobs:
           cp "$TRANSLATOR_PATH" ${{ github.workspace }}/artifacts/translator/
           echo "Translator built: $(ls -la ${{ github.workspace }}/artifacts/translator/)"
 
-      - name: Patch Plugin for SDK Compatibility
-        run: |
-          chmod +x ${{ github.workspace }}/patch_plugin_sdk.sh
-          ${{ github.workspace }}/patch_plugin_sdk.sh ~/nvmtl-build/LIVE/plugin
-
       - name: Build Metal Plugin
         run: |
           # Find Vulkan headers installed by Homebrew
