@@ -107,7 +107,12 @@ jobs:
           cp "$TRANSLATOR_PATH" ${{ github.workspace }}/artifacts/translator/
           echo "Translator built: $(ls -la ${{ github.workspace }}/artifacts/translator/)"
 
-      - name: Build Metal Plugin
+      - name: Patch Plugin for SDK Compatibility
+        run: |
+          chmod +x ${{ github.workspace }}/patch_plugin_sdk.sh
+          ${{ github.workspace }}/patch_plugin_sdk.sh ~/nvmtl-build/LIVE/plugin
+
+- name: Build Metal Plugin
         run: |
           # Find Vulkan headers installed by Homebrew
           VULKAN_INCLUDE=$(brew --prefix vulkan-headers 2>/dev/null)/include
@@ -126,6 +131,10 @@ jobs:
           
           mkdir -p ~/nvmtl-build/LIVE/plugin
           rsync -a ${{ github.workspace }}/plugin/ ~/nvmtl-build/LIVE/plugin/
+          
+          # Apply patch after rsync
+          ${{ github.workspace }}/patch_plugin_sdk.sh ~/nvmtl-build/LIVE/plugin
+          
           cd ~/nvmtl-build/LIVE/plugin
           
           # Build flags with explicit SDK and deployment target for Metal 3 features
@@ -139,6 +148,9 @@ jobs:
             -framework Foundation
             -framework Metal
             -framework IOSurface
+            -Wno-deprecated-declarations
+            -Wno-protocol
+            -Wno-incomplete-implementation
           )
           
           if [ "${{ env.BUILD_TYPE }}" = "release" ]; then
