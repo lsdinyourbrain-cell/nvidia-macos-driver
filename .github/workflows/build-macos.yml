@@ -112,7 +112,7 @@ jobs:
           chmod +x ${{ github.workspace }}/patch_plugin_sdk.sh
           ${{ github.workspace }}/patch_plugin_sdk.sh ~/nvmtl-build/LIVE/plugin
 
-- name: Build Metal Plugin
+      - name: Build Metal Plugin
         run: |
           # Find Vulkan headers installed by Homebrew
           VULKAN_INCLUDE=$(brew --prefix vulkan-headers 2>/dev/null)/include
