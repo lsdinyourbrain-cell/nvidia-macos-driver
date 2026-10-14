@@ -92,9 +92,14 @@ jobs:
           export PATH="$HOME/.cargo/bin:$PATH"
           export RUSTFLAGS="--remap-path-prefix=$(pwd)=/src --remap-path-prefix=$HOME=/build"
           cargo build --release --manifest-path wrapper/Cargo.toml
-          # Find the actual output file (cargo puts it in target/release/)
-          TRANSLATOR_PATH=$(find ~/nvmtl-build/bindless/target -name "libnvmtl_translate.dylib" -type f | head -1)
-          echo "Found translator at: $TRANSLATOR_PATH"
+          # Find the actual output file (cargo with --manifest-path puts it in wrapper/target/)
+          TRANSLATOR_PATH=$(find ~/nvmtl-build/bindless -name "libnvmtl_translate.dylib" -type f 2>/dev/null | head -1)
+          echo "Found translator at: '$TRANSLATOR_PATH'"
+          if [ -z "$TRANSLATOR_PATH" ] || [ ! -f "$TRANSLATOR_PATH" ]; then
+            echo "ERROR: Translator not found!"
+            find ~/nvmtl-build/bindless -type f -name "*.dylib" 2>/dev/null
+            exit 1
+          fi
           strip -S "$TRANSLATOR_PATH"
           install_name_tool -id @rpath/libnvmtl_translate.dylib "$TRANSLATOR_PATH"
           codesign -f -s - "$TRANSLATOR_PATH"
