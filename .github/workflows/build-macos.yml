@@ -20,7 +20,7 @@ on:
 
 jobs:
   build:
-    name: Build on macOS-${{ github.event.inputs.target_macos }}
+    name: Build on macOS (Xcode 16)
     runs-on: macos-14  # Xcode 16 available
     timeout-minutes: 120
     env:
@@ -32,8 +32,6 @@ jobs:
     steps:
       - name: Checkout driver repo
         uses: actions/checkout@v4
-        with:
-          path: nvidia-macos-driver
 
       - name: Setup Xcode
         run: |
@@ -47,7 +45,7 @@ jobs:
           source "$HOME/.cargo/env"
           rustup default stable
 
-      - name: Install Meson, Ninja, CMake
+      - name: Install Meson, Ninja, CMake, pkg-config
         run: |
           brew install meson ninja cmake pkg-config
 
@@ -66,13 +64,12 @@ jobs:
           cd ~/mesa-nvk
           git checkout ${{ env.MESA_COMMIT }}
           # Apply NVK macOS patch
-          git apply ~/nvidia-macos-driver/nvk/nvk-macos.patch
+          git apply ${{ github.workspace }}/nvk/nvk-macos.patch
 
       - name: Build Translator (libnvmtl_translate.dylib)
         run: |
-          cd ~/nvidia-macos-driver
           mkdir -p ~/nvmtl-build/bindless
-          rsync -a translator/ ~/nvmtl-build/bindless/
+          rsync -a ${{ github.workspace }}/translator/ ~/nvmtl-build/bindless/
           cd ~/nvmtl-build/bindless
           export PATH="$HOME/.cargo/bin:$PATH"
           export RUSTFLAGS="--remap-path-prefix=$(pwd)=/src --remap-path-prefix=$HOME=/build"
@@ -80,17 +77,16 @@ jobs:
           strip -S target/release/libnvmtl_translate.dylib
           install_name_tool -id @rpath/libnvmtl_translate.dylib target/release/libnvmtl_translate.dylib
           codesign -f -s - target/release/libnvmtl_translate.dylib
-          mkdir -p artifacts/translator
-          cp target/release/libnvmtl_translate.dylib artifacts/translator/
+          mkdir -p ${{ github.workspace }}/artifacts/translator
+          cp target/release/libnvmtl_translate.dylib ${{ github.workspace }}/artifacts/translator/
 
       - name: Build Metal Plugin (NVMTLDriver.bundle)
         run: |
-          cd ~/nvidia-macos-driver/plugin
           mkdir -p ~/nvmtl-build/LIVE/plugin
-          rsync -a . ~/nvmtl-build/LIVE/plugin/
+          rsync -a ${{ github.workspace }}/plugin/ ~/nvmtl-build/LIVE/plugin/
           cd ~/nvmtl-build/LIVE/plugin
           if [ "${{ env.BUILD_TYPE }}" = "release" ]; then
-            RELEASE=1 NVMTL_RELEASE=1 xcrun clang -arch x86_64 -bundle -fobjc-arc -O1 -DNVMTL_RELEASE=1 \
+            xcrun clang -arch x86_64 -bundle -fobjc-arc -O1 -DNVMTL_RELEASE=1 \
               -I"$HOME/Vulkan-Headers/include" -o NVMTLDriver NVMTLDevice.m \
               -framework Foundation -framework Metal -framework IOSurface
           else
@@ -99,8 +95,8 @@ jobs:
               -framework Foundation -framework Metal -framework IOSurface
           fi
           codesign -f -s - NVMTLDriver
-          mkdir -p ~/nvidia-macos-driver/artifacts/plugin
-          cp NVMTLDriver ~/nvidia-macos-driver/artifacts/plugin/
+          mkdir -p ${{ github.workspace }}/artifacts/plugin
+          cp NVMTLDriver ${{ github.workspace }}/artifacts/plugin/
 
       - name: Build NVK (libvulkan_nouveau.dylib)
         run: |
@@ -121,52 +117,48 @@ jobs:
             "-Drust_args=--remap-path-prefix=$(pwd)=/src --remap-path-prefix=$HOME=/build"
           ninja -C build263 -k 0 src/nouveau/vulkan/libvulkan_nouveau.dylib
           strip -S build263/src/nouveau/vulkan/libvulkan_nouveau.dylib
-          mkdir -p ~/nvidia-macos-driver/artifacts/nvk
-          cp build263/src/nouveau/vulkan/libvulkan_nouveau.dylib ~/nvidia-macos-driver/artifacts/nvk/
+          mkdir -p ${{ github.workspace }}/artifacts/nvk
+          cp build263/src/nouveau/vulkan/libvulkan_nouveau.dylib ${{ github.workspace }}/artifacts/nvk/
 
       - name: Build Kernel Extensions (kexts)
         run: |
-          cd ~/nvidia-macos-driver
-          mkdir -p artifacts/kexts
+          mkdir -p ${{ github.workspace }}/artifacts/kexts
           
           # Build NVAccel for target macOS
           if [ "${{ env.TARGET_MACOS }}" = "26" ]; then
-            NM_TAHOE=1 bash build/accel_build.sh kexts/NVRM/accel artifacts/kexts/26
-            cp -r artifacts/kexts/26/NVAccel.kext artifacts/kexts/NVAccel_Tahoe.kext
+            NM_TAHOE=1 bash ${{ github.workspace }}/build/accel_build.sh ${{ github.workspace }}/kexts/NVRM/accel ${{ github.workspace }}/artifacts/kexts/26
+            cp -r ${{ github.workspace }}/artifacts/kexts/26/NVAccel.kext ${{ github.workspace }}/artifacts/kexts/NVAccel_Tahoe.kext
           else
-            bash build/accel_build.sh kexts/NVRM/accel artifacts/kexts/15
-            cp -r artifacts/kexts/15/NVAccel.kext artifacts/kexts/NVAccel_Sequoia.kext
+            bash ${{ github.workspace }}/build/accel_build.sh ${{ github.workspace }}/kexts/NVRM/accel ${{ github.workspace }}/artifacts/kexts/15
+            cp -r ${{ github.workspace }}/artifacts/kexts/15/NVAccel.kext ${{ github.workspace }}/artifacts/kexts/NVAccel_Sequoia.kext
           fi
           
-          # Build other kexts (NVRM, NVRMFB, NVRMAGDC, NMDRM, NMHDA, NMIntelFB)
-          # These use the NVIDIA OGKM - simplified build for CI
+          # Build other kexts using their build.sh scripts
           for kext in NVRM NVRMFB NVRMAGDC NMDRM NMHDA NMIntelFB; do
-            if [ -f kexts/$kext/build.sh ]; then
-              cd kexts/$kext
+            if [ -f ${{ github.workspace }}/kexts/$kext/build.sh ]; then
+              cd ${{ github.workspace }}/kexts/$kext
               bash build.sh
-              cp -r *.kext ~/nvidia-macos-driver/artifacts/kexts/ 2>/dev/null || true
-              cd ~/nvidia-macos-driver
+              cp -r *.kext ${{ github.workspace }}/artifacts/kexts/ 2>/dev/null || true
             fi
           done
 
       - name: Create Release Package
         run: |
-          cd ~/nvidia-macos-driver
-          mkdir -p pkgroot/Library/GPUBundles pkgroot/Library/Extensions pkgroot/Users/Shared/nvfw/nvidia
+          mkdir -p ${{ github.workspace }}/pkgroot/Library/GPUBundles ${{ github.workspace }}/pkgroot/Library/Extensions ${{ github.workspace }}/pkgroot/Users/Shared/nvfw/nvidia
           
           # Copy plugin
-          cp -r artifacts/plugin/NVMTLDriver pkgroot/Library/GPUBundles/NVMTLDriver.bundle
-          cp artifacts/translator/libnvmtl_translate.dylib pkgroot/Library/GPUBundles/NVMTLDriver.bundle/
+          cp -r ${{ github.workspace }}/artifacts/plugin/NVMTLDriver ${{ github.workspace }}/pkgroot/Library/GPUBundles/NVMTLDriver.bundle
+          cp ${{ github.workspace }}/artifacts/translator/libnvmtl_translate.dylib ${{ github.workspace }}/pkgroot/Library/GPUBundles/NVMTLDriver.bundle/
           
           # Copy NVK
-          mkdir -p pkgroot/Library/GPUBundles/nvmtl
-          cp artifacts/nvk/libvulkan_nouveau.dylib pkgroot/Library/GPUBundles/nvmtl/
+          mkdir -p ${{ github.workspace }}/pkgroot/Library/GPUBundles/nvmtl
+          cp ${{ github.workspace }}/artifacts/nvk/libvulkan_nouveau.dylib ${{ github.workspace }}/pkgroot/Library/GPUBundles/nvmtl/
           
           # Copy kexts
-          cp -r artifacts/kexts/*.kext pkgroot/Library/Extensions/
+          cp -r ${{ github.workspace }}/artifacts/kexts/*.kext ${{ github.workspace }}/pkgroot/Library/Extensions/
           
           # Create install.sh
-          cat > pkgroot/install.sh << 'INSTALL_EOF'
+          cat > ${{ github.workspace }}/pkgroot/install.sh << 'INSTALL_EOF'
           #!/bin/bash
           set -euo pipefail
           echo "Installing NVIDIA driver..."
@@ -177,15 +169,15 @@ jobs:
           sudo kmutil trigger-panic-medic --volume-root /
           echo "Done. Reboot required."
           INSTALL_EOF
-          chmod +x pkgroot/install.sh
+          chmod +x ${{ github.workspace }}/pkgroot/install.sh
           
           # Create SHA256SUMS
-          cd pkgroot
-          find . -type f -name "*.kext" -o -name "*.bundle" -o -name "*.dylib" -o -name "install.sh" | \
+          cd ${{ github.workspace }}/pkgroot
+          find . -type f \( -name "*.kext" -o -name "*.bundle" -o -name "*.dylib" -o -name "install.sh" \) | \
             xargs shasum -a 256 > SHA256SUMS
           
           # Package
-          cd ..
+          cd ${{ github.workspace }}
           tar -czf nullmoth-nvidia-macos${TARGET_MACOS}-${{ github.run_number }}.tar.gz pkgroot
 
       - name: Upload Artifacts
@@ -193,8 +185,8 @@ jobs:
         with:
           name: nvidia-driver-macos${{ env.TARGET_MACOS }}-${{ env.BUILD_TYPE }}
           path: |
-            nvidia-macos-driver/artifacts/**
-            nvidia-macos-driver/nullmoth-nvidia-macos${{ env.TARGET_MACOS }}-*.tar.gz
+            artifacts/**
+            nullmoth-nvidia-macos${{ env.TARGET_MACOS }}-*.tar.gz
           retention-days: 30
 
       - name: Create GitHub Release (on tag)
@@ -202,5 +194,5 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            nvidia-macos-driver/nullmoth-nvidia-macos${{ env.TARGET_MACOS }}-*.tar.gz
+            nullmoth-nvidia-macos${{ env.TARGET_MACOS }}-*.tar.gz
           generate_release_notes: true
