@@ -20,7 +20,7 @@ on:
 
 jobs:
   build:
-    name: Build on macOS (Xcode 16)
+    name: Build on macOS (Xcode 15.4)
     runs-on: macos-14
     timeout-minutes: 120
     env:
@@ -45,23 +45,13 @@ jobs:
           ls -la /Applications/Xcode*.app 2>/dev/null || echo "No Xcode found"
           echo "=== Disk Space ==="
           df -h /
-          echo "=== Home Dir ==="
-          ls -la ~/
 
-      - name: Setup Xcode 16
+      - name: Setup Xcode (use default)
         run: |
-          # Check available Xcode versions
-          ls -la /Applications/
-          # Try to select Xcode 16 if available
-          if [ -d "/Applications/Xcode_16.app" ]; then
-            sudo xcode-select -s /Applications/Xcode_16.app
-          elif [ -d "/Applications/Xcode.app" ]; then
-            sudo xcode-select -s /Applications/Xcode.app
-          else
-            echo "ERROR: No Xcode found"
-            exit 1
-          fi
+          # macos-14 has Xcode 15.4 by default
           xcodebuild -version
+          # Ensure command line tools are selected
+          sudo xcode-select -s /Applications/Xcode.app
 
       - name: Install Rust
         run: |
@@ -90,7 +80,8 @@ jobs:
           git clone https://gitlab.freedesktop.org/mesa/mesa.git ~/mesa-nvk
           cd ~/mesa-nvk
           git checkout ${{ env.MESA_COMMIT }}
-          git apply ${{ github.workspace }}/nvk/nvk-macos.patch
+          # Apply patch with whitespace fix
+          git apply --whitespace=nowarn ${{ github.workspace }}/nvk/nvk-macos.patch
           echo "Mesa ready: $(git rev-parse --short HEAD)"
 
       - name: Build Translator
@@ -101,11 +92,14 @@ jobs:
           export PATH="$HOME/.cargo/bin:$PATH"
           export RUSTFLAGS="--remap-path-prefix=$(pwd)=/src --remap-path-prefix=$HOME=/build"
           cargo build --release --manifest-path wrapper/Cargo.toml
-          strip -S target/release/libnvmtl_translate.dylib
-          install_name_tool -id @rpath/libnvmtl_translate.dylib target/release/libnvmtl_translate.dylib
-          codesign -f -s - target/release/libnvmtl_translate.dylib
+          # Find the actual output file
+          find target -name "libnvmtl_translate.dylib" -type f
+          TRANSLATOR_PATH=$(find target -name "libnvmtl_translate.dylib" -type f | head -1)
+          strip -S "$TRANSLATOR_PATH"
+          install_name_tool -id @rpath/libnvmtl_translate.dylib "$TRANSLATOR_PATH"
+          codesign -f -s - "$TRANSLATOR_PATH"
           mkdir -p ${{ github.workspace }}/artifacts/translator
-          cp target/release/libnvmtl_translate.dylib ${{ github.workspace }}/artifacts/translator/
+          cp "$TRANSLATOR_PATH" ${{ github.workspace }}/artifacts/translator/
           echo "Translator built: $(ls -la ${{ github.workspace }}/artifacts/translator/)"
 
       - name: Build Metal Plugin
