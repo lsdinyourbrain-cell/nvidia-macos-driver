@@ -119,18 +119,35 @@ jobs:
           fi
           echo "Using Vulkan headers from: $VULKAN_INCLUDE"
           
+          # Get macOS SDK path and version
+          SDK_PATH=$(xcrun --show-sdk-path)
+          SDK_VERSION=$(xcrun --show-sdk-version)
+          echo "SDK: $SDK_PATH (version $SDK_VERSION)"
+          
           mkdir -p ~/nvmtl-build/LIVE/plugin
           rsync -a ${{ github.workspace }}/plugin/ ~/nvmtl-build/LIVE/plugin/
           cd ~/nvmtl-build/LIVE/plugin
+          
+          # Build flags with explicit SDK and deployment target for Metal 3 features
+          CLANG_FLAGS=(
+            -arch x86_64
+            -bundle
+            -fobjc-arc
+            -isysroot "$SDK_PATH"
+            -mmacosx-version-min=14.0
+            -I"$VULKAN_INCLUDE"
+            -framework Foundation
+            -framework Metal
+            -framework IOSurface
+          )
+          
           if [ "${{ env.BUILD_TYPE }}" = "release" ]; then
-            xcrun clang -arch x86_64 -bundle -fobjc-arc -O1 -DNVMTL_RELEASE=1 \
-              -I"$VULKAN_INCLUDE" -o NVMTLDriver NVMTLDevice.m \
-              -framework Foundation -framework Metal -framework IOSurface
+            CLANG_FLAGS+=(-O1 -DNVMTL_RELEASE=1)
           else
-            xcrun clang -arch x86_64 -bundle -fobjc-arc -O0 \
-              -I"$VULKAN_INCLUDE" -o NVMTLDriver NVMTLDevice.m \
-              -framework Foundation -framework Metal -framework IOSurface
+            CLANG_FLAGS+=(-O0)
           fi
+          
+          xcrun clang "${CLANG_FLAGS[@]}" -o NVMTLDriver NVMTLDevice.m
           codesign -f -s - NVMTLDriver
           mkdir -p ${{ github.workspace }}/artifacts/plugin
           cp NVMTLDriver ${{ github.workspace }}/artifacts/plugin/
