@@ -21,7 +21,7 @@ on:
 jobs:
   build:
     name: Build on macOS (Xcode 16)
-    runs-on: macos-14  # Xcode 16 available
+    runs-on: macos-14
     timeout-minutes: 120
     env:
       TARGET_MACOS: ${{ github.event.inputs.target_macos }}
@@ -33,9 +33,34 @@ jobs:
       - name: Checkout driver repo
         uses: actions/checkout@v4
 
-      - name: Setup Xcode
+      - name: Debug - System Info
         run: |
-          sudo xcode-select -s /Applications/Xcode_16.app
+          echo "=== System Info ==="
+          uname -a
+          sw_vers
+          xcodebuild -version
+          xcodebuild -showsdks
+          echo "=== Xcode Path ==="
+          xcode-select -p
+          ls -la /Applications/Xcode*.app 2>/dev/null || echo "No Xcode found"
+          echo "=== Disk Space ==="
+          df -h /
+          echo "=== Home Dir ==="
+          ls -la ~/
+
+      - name: Setup Xcode 16
+        run: |
+          # Check available Xcode versions
+          ls -la /Applications/
+          # Try to select Xcode 16 if available
+          if [ -d "/Applications/Xcode_16.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_16.app
+          elif [ -d "/Applications/Xcode.app" ]; then
+            sudo xcode-select -s /Applications/Xcode.app
+          else
+            echo "ERROR: No Xcode found"
+            exit 1
+          fi
           xcodebuild -version
 
       - name: Install Rust
@@ -44,29 +69,31 @@ jobs:
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           source "$HOME/.cargo/env"
           rustup default stable
+          rustc --version
+          cargo --version
 
-      - name: Install Meson, Ninja, CMake, pkg-config
+      - name: Install Build Tools
         run: |
-          brew install meson ninja cmake pkg-config
+          brew install meson ninja cmake pkg-config vulkan-headers
+          meson --version
+          ninja --version
+          cmake --version
 
-      - name: Install Vulkan Headers
-        run: |
-          brew install vulkan-headers
-
-      - name: Clone NVIDIA open-gpu-kernel-modules (OGKM)
+      - name: Clone NVIDIA OGKM
         run: |
           git clone --branch ${{ env.OGKM_VERSION }} --depth 1 \
             https://github.com/NVIDIA/open-gpu-kernel-modules.git ~/ogkm610
+          echo "OGKM cloned: $(ls -la ~/ogkm610 | head -5)"
 
-      - name: Prepare Mesa source for NVK
+      - name: Prepare Mesa for NVK
         run: |
           git clone https://gitlab.freedesktop.org/mesa/mesa.git ~/mesa-nvk
           cd ~/mesa-nvk
           git checkout ${{ env.MESA_COMMIT }}
-          # Apply NVK macOS patch
           git apply ${{ github.workspace }}/nvk/nvk-macos.patch
+          echo "Mesa ready: $(git rev-parse --short HEAD)"
 
-      - name: Build Translator (libnvmtl_translate.dylib)
+      - name: Build Translator
         run: |
           mkdir -p ~/nvmtl-build/bindless
           rsync -a ${{ github.workspace }}/translator/ ~/nvmtl-build/bindless/
@@ -79,8 +106,9 @@ jobs:
           codesign -f -s - target/release/libnvmtl_translate.dylib
           mkdir -p ${{ github.workspace }}/artifacts/translator
           cp target/release/libnvmtl_translate.dylib ${{ github.workspace }}/artifacts/translator/
+          echo "Translator built: $(ls -la ${{ github.workspace }}/artifacts/translator/)"
 
-      - name: Build Metal Plugin (NVMTLDriver.bundle)
+      - name: Build Metal Plugin
         run: |
           mkdir -p ~/nvmtl-build/LIVE/plugin
           rsync -a ${{ github.workspace }}/plugin/ ~/nvmtl-build/LIVE/plugin/
@@ -97,8 +125,9 @@ jobs:
           codesign -f -s - NVMTLDriver
           mkdir -p ${{ github.workspace }}/artifacts/plugin
           cp NVMTLDriver ${{ github.workspace }}/artifacts/plugin/
+          echo "Plugin built: $(ls -la ${{ github.workspace }}/artifacts/plugin/)"
 
-      - name: Build NVK (libvulkan_nouveau.dylib)
+      - name: Build NVK
         run: |
           cd ~/mesa-nvk
           meson setup build263 \
@@ -119,12 +148,13 @@ jobs:
           strip -S build263/src/nouveau/vulkan/libvulkan_nouveau.dylib
           mkdir -p ${{ github.workspace }}/artifacts/nvk
           cp build263/src/nouveau/vulkan/libvulkan_nouveau.dylib ${{ github.workspace }}/artifacts/nvk/
+          echo "NVK built: $(ls -la ${{ github.workspace }}/artifacts/nvk/)"
 
-      - name: Build Kernel Extensions (kexts)
+      - name: Build Kernel Extensions
         run: |
           mkdir -p ${{ github.workspace }}/artifacts/kexts
           
-          # Build NVAccel for target macOS
+          # Build NVAccel
           if [ "${{ env.TARGET_MACOS }}" = "26" ]; then
             NM_TAHOE=1 bash ${{ github.workspace }}/build/accel_build.sh ${{ github.workspace }}/kexts/NVRM/accel ${{ github.workspace }}/artifacts/kexts/26
             cp -r ${{ github.workspace }}/artifacts/kexts/26/NVAccel.kext ${{ github.workspace }}/artifacts/kexts/NVAccel_Tahoe.kext
@@ -133,7 +163,7 @@ jobs:
             cp -r ${{ github.workspace }}/artifacts/kexts/15/NVAccel.kext ${{ github.workspace }}/artifacts/kexts/NVAccel_Sequoia.kext
           fi
           
-          # Build other kexts using their build.sh scripts
+          # Build other kexts
           for kext in NVRM NVRMFB NVRMAGDC NMDRM NMHDA NMIntelFB; do
             if [ -f ${{ github.workspace }}/kexts/$kext/build.sh ]; then
               cd ${{ github.workspace }}/kexts/$kext
@@ -141,23 +171,20 @@ jobs:
               cp -r *.kext ${{ github.workspace }}/artifacts/kexts/ 2>/dev/null || true
             fi
           done
+          echo "Kexts built: $(ls -la ${{ github.workspace }}/artifacts/kexts/)"
 
       - name: Create Release Package
         run: |
           mkdir -p ${{ github.workspace }}/pkgroot/Library/GPUBundles ${{ github.workspace }}/pkgroot/Library/Extensions ${{ github.workspace }}/pkgroot/Users/Shared/nvfw/nvidia
           
-          # Copy plugin
           cp -r ${{ github.workspace }}/artifacts/plugin/NVMTLDriver ${{ github.workspace }}/pkgroot/Library/GPUBundles/NVMTLDriver.bundle
           cp ${{ github.workspace }}/artifacts/translator/libnvmtl_translate.dylib ${{ github.workspace }}/pkgroot/Library/GPUBundles/NVMTLDriver.bundle/
           
-          # Copy NVK
           mkdir -p ${{ github.workspace }}/pkgroot/Library/GPUBundles/nvmtl
           cp ${{ github.workspace }}/artifacts/nvk/libvulkan_nouveau.dylib ${{ github.workspace }}/pkgroot/Library/GPUBundles/nvmtl/
           
-          # Copy kexts
           cp -r ${{ github.workspace }}/artifacts/kexts/*.kext ${{ github.workspace }}/pkgroot/Library/Extensions/
           
-          # Create install.sh
           cat > ${{ github.workspace }}/pkgroot/install.sh << 'INSTALL_EOF'
           #!/bin/bash
           set -euo pipefail
@@ -171,14 +198,13 @@ jobs:
           INSTALL_EOF
           chmod +x ${{ github.workspace }}/pkgroot/install.sh
           
-          # Create SHA256SUMS
           cd ${{ github.workspace }}/pkgroot
           find . -type f \( -name "*.kext" -o -name "*.bundle" -o -name "*.dylib" -o -name "install.sh" \) | \
             xargs shasum -a 256 > SHA256SUMS
           
-          # Package
           cd ${{ github.workspace }}
           tar -czf nullmoth-nvidia-macos${TARGET_MACOS}-${{ github.run_number }}.tar.gz pkgroot
+          echo "Package created: $(ls -la nullmoth-nvidia-macos${TARGET_MACOS}-${{ github.run_number }}.tar.gz)"
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
@@ -188,11 +214,3 @@ jobs:
             artifacts/**
             nullmoth-nvidia-macos${{ env.TARGET_MACOS }}-*.tar.gz
           retention-days: 30
-
-      - name: Create GitHub Release (on tag)
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v1
-        with:
-          files: |
-            nullmoth-nvidia-macos${{ env.TARGET_MACOS }}-*.tar.gz
-          generate_release_notes: true
