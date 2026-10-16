@@ -127,11 +127,16 @@ jobs:
           mkdir -p ~/nvmtl-build/LIVE/plugin
           rsync -a ${{ github.workspace }}/plugin/ ~/nvmtl-build/LIVE/plugin/
           
-          # Apply SDK compatibility patch
-          cd ~/nvmtl-build/LIVE/plugin
-          git apply --whitespace=nowarn ${{ github.workspace }}/plugin_sdk.patch
+          # Copy SDK compatibility header
+          cp ${{ github.workspace }}/plugin/nvmtl_sdk_compat.h ~/nvmtl-build/LIVE/plugin/
           
+          # Modify source to include compat header before Metal.h
           cd ~/nvmtl-build/LIVE/plugin
+          for f in NVMTLObjects.h NVMTLObjects.m NVMTLDevice.m NVMTLDevice.h NVMTLEventSync.m; do
+            if [ -f "$f" ]; then
+              sed -i '' 's|#import <Metal/Metal.h>|#import "nvmtl_sdk_compat.h"\n#import <Metal/Metal.h>|' "$f"
+            fi
+          done
           
           # Build flags with explicit SDK and deployment target for Metal 3 features
           CLANG_FLAGS=(
