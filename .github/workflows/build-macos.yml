@@ -107,64 +107,27 @@ jobs:
           cp "$TRANSLATOR_PATH" ${{ github.workspace }}/artifacts/translator/
           echo "Translator built: $(ls -la ${{ github.workspace }}/artifacts/translator/)"
 
-      - name: Build Metal Plugin
+      - name: Download Prebuilt Metal Plugin
         run: |
-          # Find Vulkan headers installed by Homebrew
-          VULKAN_INCLUDE=$(brew --prefix vulkan-headers 2>/dev/null)/include
-          if [ ! -f "$VULKAN_INCLUDE/vulkan/vulkan_core.h" ]; then
-            VULKAN_INCLUDE="/opt/homebrew/include"
+          # Download prebuilt NVMTLDriver.bundle from latest release
+          # (plugin requires macOS 15+ SDK, not available on CI runners)
+          echo "Downloading prebuilt plugin from latest release..."
+          LATEST_URL=$(curl -s https://api.github.com/repos/nullmoth/nvidia-macos-driver/releases/latest | grep -o '"browser_download_url": "[^"]*\.tar\.gz"' | head -1 | cut -d'"' -f4)
+          echo "Release URL: $LATEST_URL"
+          curl -L -o /tmp/driver.tar.gz "$LATEST_URL"
+          mkdir -p /tmp/driver-extract
+          tar -xzf /tmp/driver.tar.gz -C /tmp/driver-extract
+          # Find and copy the plugin bundle
+          PLUGIN_BUNDLE=$(find /tmp/driver-extract -name "NVMTLDriver.bundle" -type d | head -1)
+          if [ -z "$PLUGIN_BUNDLE" ]; then
+            echo "ERROR: NVMTLDriver.bundle not found in release"
+            find /tmp/driver-extract -type f | head -20
+            exit 1
           fi
-          if [ ! -f "$VULKAN_INCLUDE/vulkan/vulkan_core.h" ]; then
-            VULKAN_INCLUDE="/usr/local/include"
-          fi
-          echo "Using Vulkan headers from: $VULKAN_INCLUDE"
-          
-          # Get macOS SDK path and version
-          SDK_PATH=$(xcrun --show-sdk-path)
-          SDK_VERSION=$(xcrun --show-sdk-version)
-          echo "SDK: $SDK_PATH (version $SDK_VERSION)"
-          
-          mkdir -p ~/nvmtl-build/LIVE/plugin
-          rsync -a ${{ github.workspace }}/plugin/ ~/nvmtl-build/LIVE/plugin/
-          
-          # Copy SDK compatibility header
-          cp ${{ github.workspace }}/plugin/nvmtl_sdk_compat.h ~/nvmtl-build/LIVE/plugin/
-          
-          # Modify source to include compat header before Metal.h
-          cd ~/nvmtl-build/LIVE/plugin
-          for f in NVMTLObjects.h NVMTLObjects.m NVMTLDevice.m NVMTLDevice.h NVMTLEventSync.m; do
-            if [ -f "$f" ]; then
-              sed -i '' 's|#import <Metal/Metal.h>|#import "nvmtl_sdk_compat.h"\n#import <Metal/Metal.h>|' "$f"
-            fi
-          done
-          
-          # Build flags with explicit SDK and deployment target for Metal 3 features
-          CLANG_FLAGS=(
-            -arch x86_64
-            -bundle
-            -fobjc-arc
-            -isysroot "$SDK_PATH"
-            -mmacosx-version-min=14.0
-            -I"$VULKAN_INCLUDE"
-            -framework Foundation
-            -framework Metal
-            -framework IOSurface
-            -Wno-deprecated-declarations
-            -Wno-protocol
-            -Wno-incomplete-implementation
-          )
-          
-          if [ "${{ env.BUILD_TYPE }}" = "release" ]; then
-            CLANG_FLAGS+=(-O1 -DNVMTL_RELEASE=1)
-          else
-            CLANG_FLAGS+=(-O0)
-          fi
-          
-          xcrun clang "${CLANG_FLAGS[@]}" -o NVMTLDriver NVMTLDevice.m
-          codesign -f -s - NVMTLDriver
+          echo "Found plugin at: $PLUGIN_BUNDLE"
           mkdir -p ${{ github.workspace }}/artifacts/plugin
-          cp NVMTLDriver ${{ github.workspace }}/artifacts/plugin/
-          echo "Plugin built: $(ls -la ${{ github.workspace }}/artifacts/plugin/)"
+          cp -r "$PLUGIN_BUNDLE" ${{ github.workspace }}/artifacts/plugin/
+          echo "Plugin ready: $(ls -la ${{ github.workspace }}/artifacts/plugin/NVMTLDriver.bundle/)"
 
       - name: Build NVK
         run: |
